@@ -1,0 +1,545 @@
+
+using System.Collections.Generic;
+using UnityEngine;
+
+public class AdityaBattleArena : MonoBehaviour
+{
+    [Header("Game Settings")]
+    public int enemyCount = 15;
+    public int mapSize = 300;
+    public float walkSpeed = 6f;
+    public float runSpeed = 10f;
+    public float mouseSensitivity = 2f;
+
+    [Header("Player")]
+    public int maxHealth = 100;
+    public int health = 100;
+    public int kills = 0;
+    public int score = 0;
+
+    private GameObject player;
+    private CharacterController controller;
+    private Camera gameCamera;
+    private GameObject parachute;
+    private GameObject cameraPivot;
+
+    private float verticalVelocity;
+    private float cameraYaw;
+    private float cameraPitch = 12f;
+    private bool landed = false;
+    private bool gameOver = false;
+
+    private int selectedWeapon = 1;
+    private float nextShot;
+    private float reloadTimer;
+    private bool isReloading = false;
+
+    private readonly string[] gunNames =
+    {
+        "Pistol", "Assault Rifle", "Shotgun", "Sniper", "SMG"
+    };
+
+    private readonly int[] gunDamage = { 25, 22, 12, 100, 14 };
+    private readonly int[] magazineSize = { 15, 30, 8, 5, 40 };
+    private readonly float[] fireRate = { 0.30f, 0.12f, 0.70f, 1.0f, 0.08f };
+    private readonly float[] gunRange = { 60f, 100f, 20f, 250f, 70f };
+
+    private int[] ammo = { 15, 30, 8, 5, 40 };
+    private int[] reserveAmmo = { 60, 120, 40, 25, 160 };
+
+    private class Enemy
+    {
+        public GameObject body;
+        public int hp;
+        public int maxHp;
+        public bool boss;
+        public float nextAttack;
+        public float speed;
+        public int damage;
+    }
+
+    private readonly List<Enemy> enemies = new List<Enemy>();
+
+    void Start()
+    {
+        Application.targetFrameRate = 60;
+        Cursor.lockState = CursorLockMode.Locked;
+
+        CreateWorld();
+        CreatePlayer();
+        CreateCamera();
+        CreateEnemies();
+    }
+
+    void Update()
+    {
+        if (gameOver) return;
+
+        HandleCamera();
+        HandleMovement();
+        HandleWeapons();
+        UpdateEnemies();
+
+        if (health <= 0)
+        {
+            health = 0;
+            gameOver = true;
+            Cursor.lockState = CursorLockMode.None;
+        }
+    }
+
+    // ---------------- WORLD ----------------
+
+    void CreateWorld()
+    {
+        RenderSettings.ambientLight = new Color(0.65f, 0.65f, 0.65f);
+
+        GameObject ground = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        ground.name = "Battle Island";
+        ground.transform.position = new Vector3(0, -0.5f, 0);
+        ground.transform.localScale = new Vector3(mapSize, 1, mapSize);
+        ground.GetComponent<Renderer>().material.color =
+            new Color(0.25f, 0.48f, 0.22f);
+
+        CreateBlock("Central Road", new Vector3(0, 0.02f, 0),
+            new Vector3(12, 0.05f, mapSize), Color.gray);
+
+        CreateBlock("Cross Road", new Vector3(0, 0.03f, 0),
+            new Vector3(mapSize, 0.05f, 12), Color.gray);
+
+        for (int i = 0; i < 35; i++)
+        {
+            Vector3 p = RandomMapPosition(25);
+
+            // Avoid the central road.
+            if (Mathf.Abs(p.x) < 15 || Mathf.Abs(p.z) < 15)
+                continue;
+
+            CreateHouse(p);
+        }
+
+        for (int i = 0; i < 100; i++)
+        {
+            Vector3 p = RandomMapPosition(10);
+
+            if (Mathf.Abs(p.x) < 12 || Mathf.Abs(p.z) < 12)
+                continue;
+
+            CreateTree(p);
+        }
+
+        // Lighting
+        GameObject sun = new GameObject("Sun Light");
+        Light light = sun.AddComponent<Light>();
+        light.type = LightType.Directional;
+        light.intensity = 1.2f;
+        sun.transform.rotation = Quaternion.Euler(50, -30, 0);
+
+        RenderSettings.fog = true;
+        RenderSettings.fogColor = new Color(0.65f, 0.75f, 0.65f);
+        RenderSettings.fogDensity = 0.0015f;
+    }
+
+    Vector3 RandomMapPosition(float margin)
+    {
+        return new Vector3(
+            Random.Range(-mapSize / 2f + margin, mapSize / 2f - margin),
+            0,
+            Random.Range(-mapSize / 2f + margin, mapSize / 2f - margin)
+        );
+    }
+
+    void CreateBlock(string objectName, Vector3 position,
+        Vector3 size, Color color)
+    {
+        GameObject obj = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        obj.name = objectName;
+        obj.transform.position = position;
+        obj.transform.localScale = size;
+        obj.GetComponent<Renderer>().material.color = color;
+    }
+
+    void CreateHouse(Vector3 p)
+    {
+        float width = Random.Range(7f, 12f);
+        float height = Random.Range(4f, 7f);
+
+        CreateBlock("House Building",
+            p + Vector3.up * (height / 2f),
+            new Vector3(width, height, width),
+            new Color(0.65f, 0.48f, 0.32f));
+
+        CreateBlock("House Roof",
+            p + Vector3.up * (height + 0.3f),
+            new Vector3(width + 1f, 0.6f, width + 1f),
+            new Color(0.35f, 0.13f, 0.12f));
+
+        CreateBlock("House Door",
+            p + new Vector3(0, 1.1f, -width / 2f - 0.03f),
+            new Vector3(1.5f, 2.2f, 0.15f),
+            new Color(0.2f, 0.1f, 0.05f));
+    }
+
+    void CreateTree(Vector3 p)
+    {
+        GameObject trunk = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
+        trunk.name = "Tree Trunk";
+        trunk.transform.position = p + Vector3.up;
+        trunk.transform.localScale = new Vector3(0.6f, 1.5f, 0.6f);
+        trunk.GetComponent<Renderer>().material.color =
+            new Color(0.35f, 0.2f, 0.1f);
+
+        GameObject leaves = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+        leaves.name = "Tree Leaves";
+        leaves.transform.position = p + Vector3.up * 3.5f;
+        leaves.transform.localScale = new Vector3(3, 4, 3);
+        leaves.GetComponent<Renderer>().material.color =
+            new Color(0.08f, 0.35f, 0.08f);
+    }
+
+    // ---------------- PLAYER ----------------
+
+    void CreatePlayer()
+    {
+        player = GameObject.CreatePrimitive(PrimitiveType.Capsule);
+        player.name = "Aditya Player";
+        player.tag = "Player";
+        player.transform.position = new Vector3(0, 25, 0);
+        player.GetComponent<Renderer>().material.color =
+            new Color(0.15f, 0.35f, 0.9f);
+
+        Destroy(player.GetComponent<CapsuleCollider>());
+
+        controller = player.AddComponent<CharacterController>();
+        controller.height = 2f;
+        controller.radius = 0.45f;
+        controller.center = Vector3.zero;
+
+        // Simple parachute canopy.
+        parachute = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+        parachute.name = "Parachute";
+        parachute.transform.SetParent(player.transform);
+        parachute.transform.localPosition = new Vector3(0, 4f, 0);
+        parachute.transform.localScale = new Vector3(4f, 0.6f, 2f);
+        parachute.GetComponent<Renderer>().material.color =
+            new Color(1f, 0.35f, 0.08f);
+        Destroy(parachute.GetComponent<Collider>());
+    }
+
+    void CreateCamera()
+    {
+        GameObject camObj = new GameObject("Third Person Camera");
+        gameCamera = camObj.AddComponent<Camera>();
+        gameCamera.fieldOfView = 70f;
+        gameCamera.nearClipPlane = 0.1f;
+        gameCamera.farClipPlane = 500f;
+
+        cameraPivot = new GameObject("Camera Pivot");
+        cameraPivot.transform.SetParent(player.transform);
+        cameraPivot.transform.localPosition = new Vector3(0, 1.2f, 0);
+
+        UpdateCameraPosition();
+    }
+
+    void HandleCamera()
+    {
+        if (Cursor.lockState != CursorLockMode.Locked)
+        {
+            if (Input.GetMouseButtonDown(0))
+                Cursor.lockState = CursorLockMode.Locked;
+            return;
+        }
+
+        cameraYaw += Input.GetAxis("Mouse X") * mouseSensitivity;
+        cameraPitch -= Input.GetAxis("Mouse Y") * mouseSensitivity;
+        cameraPitch = Mathf.Clamp(cameraPitch, -15f, 55f);
+
+        player.transform.rotation = Quaternion.Euler(0, cameraYaw, 0);
+
+        UpdateCameraPosition();
+    }
+
+    void UpdateCameraPosition()
+    {
+        if (gameCamera == null || cameraPivot == null) return;
+
+        Quaternion rotation = Quaternion.Euler(cameraPitch, cameraYaw, 0);
+        Vector3 offset = rotation * new Vector3(0, 2.2f, -6f);
+
+        gameCamera.transform.position = cameraPivot.transform.position + offset;
+        gameCamera.transform.LookAt(cameraPivot.transform.position +
+                                    Quaternion.Euler(0, cameraYaw, 0) *
+                                    new Vector3(0, 0.4f, 2f));
+    }
+
+    void HandleMovement()
+    {
+        if (controller == null) return;
+
+        float x = Input.GetAxis("Horizontal");
+        float z = Input.GetAxis("Vertical");
+
+        Vector3 move = player.transform.right * x +
+                       player.transform.forward * z;
+
+        move = Vector3.ClampMagnitude(move, 1f);
+
+        float speed = Input.GetKey(KeyCode.LeftShift)
+            ? runSpeed : walkSpeed;
+
+        if (controller.isGrounded && verticalVelocity < 0)
+            verticalVelocity = -2f;
+        else
+            verticalVelocity -= 18f * Time.deltaTime;
+
+        // Parachute landing sequence.
+        if (!landed)
+        {
+            verticalVelocity = -4f;
+
+            if (player.transform.position.y <= 3f)
+            {
+                landed = true;
+                if (parachute != null)
+                    parachute.SetActive(false);
+            }
+        }
+
+        Vector3 velocity = move * speed;
+        velocity.y = verticalVelocity;
+
+        controller.Move(velocity * Time.deltaTime);
+
+        if (player.transform.position.y <= 0.1f)
+        {
+            Vector3 pos = player.transform.position;
+            pos.y = 0.1f;
+            player.transform.position = pos;
+            landed = true;
+            if (parachute != null)
+                parachute.SetActive(false);
+        }
+    }
+
+    // ---------------- WEAPONS ----------------
+
+    void HandleWeapons()
+    {
+        for (int i = 0; i < 5; i++)
+        {
+            if (Input.GetKeyDown(KeyCode.Alpha1 + i))
+                selectedWeapon = i;
+        }
+
+        if (Input.GetKeyDown(KeyCode.R))
+            StartReload();
+
+        if (isReloading)
+        {
+            reloadTimer -= Time.deltaTime;
+
+            if (reloadTimer <= 0)
+                FinishReload();
+        }
+
+        if (Input.GetMouseButton(0))
+            Shoot();
+    }
+
+    void Shoot()
+    {
+        if (isReloading || Time.time < nextShot) return;
+
+        if (ammo[selectedWeapon] <= 0)
+        {
+            StartReload();
+            return;
+        }
+
+        nextShot = Time.time + fireRate[selectedWeapon];
+        ammo[selectedWeapon]--;
+
+        Ray ray = new Ray(gameCamera.transform.position,
+                          gameCamera.transform.forward);
+
+        if (Physics.Raycast(ray, out RaycastHit hit,
+            gunRange[selectedWeapon]))
+        {
+            Enemy enemy = FindEnemy(hit.collider.gameObject);
+
+            if (enemy != null)
+            {
+                enemy.hp -= gunDamage[selectedWeapon];
+
+                if (enemy.hp <= 0)
+                    KillEnemy(enemy);
+            }
+        }
+    }
+
+    void StartReload()
+    {
+        if (isReloading) return;
+        if (ammo[selectedWeapon] >= magazineSize[selectedWeapon]) return;
+        if (reserveAmmo[selectedWeapon] <= 0) return;
+
+        isReloading = true;
+        reloadTimer = 1.5f;
+    }
+
+    void FinishReload()
+    {
+        int needed = magazineSize[selectedWeapon] -
+                     ammo[selectedWeapon];
+
+        int amount = Mathf.Min(needed, reserveAmmo[selectedWeapon]);
+
+        ammo[selectedWeapon] += amount;
+        reserveAmmo[selectedWeapon] -= amount;
+        isReloading = false;
+    }
+
+    // ---------------- ENEMIES AND BOSS ----------------
+
+    void CreateEnemies()
+    {
+        for (int i = 0; i < enemyCount; i++)
+        {
+            Vector3 p = RandomMapPosition(25);
+            CreateEnemy(p, false);
+        }
+
+        CreateEnemy(new Vector3(40, 0, 40), true);
+    }
+
+    void CreateEnemy(Vector3 p, bool boss)
+    {
+        GameObject obj = GameObject.CreatePrimitive(PrimitiveType.Capsule);
+        obj.name = boss ? "BOSS" : "Enemy";
+
+        obj.transform.position = p + Vector3.up;
+        obj.transform.localScale = boss
+            ? new Vector3(2.5f, 2.5f, 2.5f)
+            : Vector3.one;
+
+        obj.GetComponent<Renderer>().material.color = boss
+            ? Color.red
+            : new Color(0.9f, 0.65f, 0.15f);
+
+        Enemy e = new Enemy();
+        e.body = obj;
+        e.boss = boss;
+        e.maxHp = boss ? 500 : 100;
+        e.hp = e.maxHp;
+        e.speed = boss ? 1.8f : 2.5f;
+        e.damage = boss ? 25 : 10;
+        e.nextAttack = 0;
+
+        enemies.Add(e);
+    }
+
+    Enemy FindEnemy(GameObject obj)
+    {
+        foreach (Enemy e in enemies)
+        {
+            if (e.body == obj || obj.transform.IsChildOf(e.body.transform))
+                return e;
+        }
+
+        return null;
+    }
+
+    void UpdateEnemies()
+    {
+        foreach (Enemy e in enemies)
+        {
+            if (e.body == null) continue;
+
+            Vector3 target = player.transform.position;
+            Vector3 direction = target - e.body.transform.position;
+            direction.y = 0;
+
+            float distance = direction.magnitude;
+
+            if (distance > 2f)
+            {
+                e.body.transform.position +=
+                    direction.normalized * e.speed * Time.deltaTime;
+
+                if (direction.sqrMagnitude > 0.01f)
+                    e.body.transform.rotation =
+                        Quaternion.LookRotation(direction);
+            }
+            else if (Time.time >= e.nextAttack)
+            {
+                e.nextAttack = Time.time + 1.5f;
+                health -= e.damage;
+            }
+        }
+    }
+
+    void KillEnemy(Enemy e)
+    {
+        if (e.body != null)
+            Destroy(e.body);
+
+        kills++;
+        score += e.boss ? 1000 : 100;
+        enemies.Remove(e);
+    }
+
+    // ---------------- HUD ----------------
+
+    void OnGUI()
+    {
+        GUI.color = Color.white;
+        GUI.Box(new Rect(10, 10, 250, 160), "ADITYA BATTLE ARENA");
+
+        GUI.Label(new Rect(20, 40, 230, 25),
+            "Health: " + health + " / " + maxHealth);
+
+        GUI.Label(new Rect(20, 65, 230, 25),
+            "Kills: " + kills + "   Score: " + score);
+
+        GUI.Label(new Rect(20, 90, 230, 25),
+            "Gun: " + gunNames[selectedWeapon]);
+
+        GUI.Label(new Rect(20, 115, 230, 25),
+            "Ammo: " + ammo[selectedWeapon] + " / " +
+            reserveAmmo[selectedWeapon]);
+
+        GUI.Label(new Rect(20, 140, 230, 25),
+            isReloading ? "Reloading..." : "Press R to Reload");
+
+        GUI.Box(new Rect(Screen.width - 220, 10, 210, 150), "CONTROLS");
+        GUI.Label(new Rect(Screen.width - 210, 40, 200, 25), "WASD: Move");
+        GUI.Label(new Rect(Screen.width - 210, 65, 200, 25), "Shift: Run");
+        GUI.Label(new Rect(Screen.width - 210, 90, 200, 25), "Mouse: Aim");
+        GUI.Label(new Rect(Screen.width - 210, 115, 200, 25), "Left Click: Shoot");
+        GUI.Label(new Rect(Screen.width - 210, 140, 200, 25), "1-5: Change Gun");
+
+        if (!landed)
+        {
+            GUI.Box(new Rect(Screen.width / 2 - 100, 20, 200, 35),
+                "PARACHUTE LANDING!");
+        }
+
+        if (gameOver)
+        {
+            GUI.Box(new Rect(Screen.width / 2 - 150,
+                Screen.height / 2 - 70, 300, 140), "GAME OVER");
+
+            GUI.Label(new Rect(Screen.width / 2 - 80,
+                Screen.height / 2 - 20, 200, 30),
+                "Final Score: " + score);
+
+            if (GUI.Button(new Rect(Screen.width / 2 - 60,
+                Screen.height / 2 + 20, 120, 35), "Restart"))
+            {
+                Time.timeScale = 1f;
+                UnityEngine.SceneManagement.SceneManager.LoadScene(
+                    UnityEngine.SceneManagement.SceneManager.GetActiveScene().buildIndex);
+            }
+        }
+    }
+}
